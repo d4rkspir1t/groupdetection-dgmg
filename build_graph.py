@@ -3,6 +3,10 @@ import os
 import csv
 from pprint import pprint
 import math
+import dgl
+import numpy as np
+import networkx as nx
+import matplotlib.pyplot as plt
 
 
 base_path_cpp = 'salsa/Annotation/salsa_cpp/'
@@ -99,6 +103,7 @@ for frame_id, frame_info in frame_data.items():
                         effort = math.pi * 2 + angle_diff
                     else:
                         effort = angle_diff
+                    # src dst dist eff
                     edge_data.append([person, node_data[idx][0], distance, effort])
     # pprint(edge_data)
     # print(len(edge_data))
@@ -108,3 +113,45 @@ for frame_id, frame_info in frame_data.items():
 # for idx in df_ff.index:
 #     print(idx, df_ff.loc[idx]['time'], df_ff.loc[idx]['group'])
 print(len(frame_data_cpp.keys()), len(frame_data_ps.keys()), len(frame_node_data.keys()), len(frame_edge_data.keys()))
+iters_cpp = 0
+iters_ps = 0
+for frame_id, val in frame_edge_data.items():
+    print('FR ID: ', frame_id)
+    srcs = []
+    dsts = []
+    pos = {}
+    for entry in val:
+        srcs.append(entry[0]-1)
+        dsts.append(entry[1]-1)
+    for person in frame_node_data[frame_id]:
+        pos[person[0]-1] = [person[2], person[3]]
+    graph = dgl.graph((srcs, dsts))
+    print('# nodes: %d, # edges: %d' % (graph.number_of_nodes(), graph.number_of_edges()))
+    nx_g = graph.to_networkx().to_undirected()
+    # pos = nx.kamada_kawai_layout(nx_g)
+    print(pos)
+    # should assign pos on -1:1 scale based on coordinates
+    try:
+        nx.draw(nx_g, pos, with_labels=True, node_color="#A0CBE2")
+    except nx.exception.NetworkXError:
+        node_cs = []
+        for i in range(18):
+            if i not in pos.keys():
+                pos[i] = [0, 0]
+                node_cs.append('#541E1B')
+            else:
+                node_cs.append("#A0CBE2")
+        nx.draw(nx_g, pos, with_labels=True, node_color=node_cs)
+    if float(frame_id) < extra_time:
+        base_path = 'salsa/cpp_graphs'
+        iters_cpp += 1
+        name = '%d.png' % iters_cpp
+        graph_path = os.path.join(base_path, name.rjust(9, '0'))
+    else:
+        base_path = 'salsa/ps_graphs'
+        iters_ps += 1
+        name = '%d.png' % iters_ps
+        graph_path = os.path.join(base_path, name.rjust(9, '0'))
+    plt.savefig(graph_path)
+    plt.close()
+    # break
