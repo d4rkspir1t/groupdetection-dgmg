@@ -1,6 +1,7 @@
 import pandas as pd
 import os
 import csv
+import copy
 from pprint import pprint
 import math
 import dgl
@@ -75,7 +76,7 @@ class MLPPredictor(nn.Module):
             # return g.edata['score']
             # print('executes', g.edata)
             out_dict = dict(g.edata)
-            return out_dict
+            return out_dict, g
 
 
 def compute_loss(pos_score, neg_score):
@@ -304,8 +305,8 @@ if param_opt:
                 for e in range(epochs):
                     # forward
                     h = model(batched_graph, batched_graph.ndata['feat'])
-                    pos_score = pred(train_pos_g, h)['score']
-                    neg_score = pred(train_neg_g, h)['score']
+                    pos_score = pred(train_pos_g, h)[0]['score']
+                    neg_score = pred(train_neg_g, h)[0]['score']
                     loss = compute_loss(pos_score, neg_score)
 
                     # backward
@@ -332,8 +333,8 @@ if param_opt:
                 test_pos_g = dgl.graph((test_pos_u, test_pos_v), num_nodes=batched_graph.number_of_nodes())
                 test_neg_g = dgl.graph((test_neg_u, test_neg_v), num_nodes=batched_graph.number_of_nodes())
                 with torch.no_grad():
-                    pos_score = pred(test_pos_g, h)['score']
-                    neg_score = pred(test_neg_g, h)['score']
+                    pos_score = pred(test_pos_g, h)[0]['score']
+                    neg_score = pred(test_neg_g, h)[0]['score']
                     auc = compute_auc(pos_score, neg_score)
                     # print('AUC', auc)
                     auc_scores.append(auc)
@@ -379,8 +380,8 @@ else:
         for e in range(epochs):
             # forward
             h = model(batched_graph, batched_graph.ndata['feat'])
-            pos_score = pred(train_pos_g, h)['score']
-            neg_score = pred(train_neg_g, h)['score']
+            pos_score = pred(train_pos_g, h)[0]['score']
+            neg_score = pred(train_neg_g, h)[0]['score']
             loss = compute_loss(pos_score, neg_score)
 
             # backward
@@ -395,36 +396,66 @@ else:
     #
     auc_scores = []
     for batched_graph in test_graphs:
+        test_graph = copy.copy(batched_graph)
+        print('Test graph', test_graph.ndata['feat'])
+        test_eids = test_graph.edges(form='eid')
+        test_graph.remove_edges(test_eids)
+        print('Test graph', test_graph.num_nodes(), test_graph.num_edges())
         print(batched_graph.num_nodes(), batched_graph.num_edges())
         # print(batched_graph.nodes())
         u, v = batched_graph.edges()
+        u_t, v_t = test_graph.edges()
         adj = sp.coo_matrix((np.ones(len(u)), (u.numpy(), v.numpy())))
+        # adj_t = sp.coo_matrix((np.ones(len(u_t)), (u_t.numpy(), v_t.numpy())))
         try:
             adj_neg = 1 - adj.todense() - np.eye(batched_graph.number_of_nodes())
+            adj_t_neg = 1 - np.eye(test_graph.number_of_nodes())
         except ValueError:
             continue
         neg_u, neg_v = np.where(adj_neg != 0)
+        neg_t_u, neg_t_v = np.where(adj_t_neg != 0)
         test_pos_u, test_pos_v = u, v
         test_neg_u, test_neg_v = neg_u, neg_v
         test_pos_g = dgl.graph((test_pos_u, test_pos_v), num_nodes=batched_graph.number_of_nodes())
         test_neg_g = dgl.graph((test_neg_u, test_neg_v), num_nodes=batched_graph.number_of_nodes())
+        test_full_graph = dgl.graph((neg_t_u, neg_t_v), num_nodes=test_graph.number_of_nodes())
+        # test_full_graph.ndata['feat'] = test_graph.ndata['feat']
+        print('Test graph negative stats', test_full_graph.num_nodes(), test_full_graph.num_edges())
         with torch.no_grad():
-            pos_out = pred(test_pos_g, h)
-            neg_out = pred(test_neg_g, h)
+            pos_out, pos_graph_out = pred(test_pos_g, h)
+            neg_out, neg_graph_out = pred(test_neg_g, h)
+            test_out, test_graph_out = pred(test_full_graph, h)
             pos_score = pos_out['score']
             neg_score = neg_out['score']
 
             pos_labels = pos_out['label']
             neg_labels = neg_out['label']
+            test_labels = test_out['label']
+            # print('Test labels: ', len(test_labels), test_labels)
             pred_labels = torch.cat([pos_labels, neg_labels]).numpy()
             scores = torch.cat([pos_score, neg_score]).numpy()
             labels = torch.cat(
                 [torch.ones(pos_score.shape[0]), torch.zeros(neg_score.shape[0])]).numpy()
             auc = roc_auc_score(labels, scores)
-            print(len(scores), '\n', pred_labels[:len(pos_labels)], '\n', pred_labels[len(pos_labels):])
+            # print(len(scores), '\n', pred_labels[:len(pos_labels)], '\n', pred_labels[len(pos_labels):])
             print('AUC', auc)
             auc_scores.append(auc)
-
+        to_remove = []
+        for i in range(len(test_labels)):
+            if test_labels[i] == 0:
+                to_remove.append(i)
+        fig, (ax1, ax2) = plt.subplots(1, 2)
+        test_graph_out.remove_edges(to_remove)
+        nx_g = test_graph_out.to_networkx().to_undirected()
+        # pos = nx.kamada_kawai_layout(nx_g)
+        ax1 = plt.subplot(1,2,1)
+        nx.draw(nx_g, pos, with_labels=True, node_color="#A0CBE2")
+        # ax1.margin(5)
+        ax2 = plt.subplot(1,2,2)
+        nx_g_original = batched_graph.to_networkx().to_undirected()
+        nx.draw(nx_g_original, pos, with_labels=True, node_color="#A0CBE2")
+        # ax2.margin(5)
+        # plt.show()
     print('#%d of %d\t%d, %d\tTested on: %d, Avg AUC: %.4f, Stdev: %.4f' % (count, total, h_feats, epochs,
                                                                             len(auc_scores), np.mean(auc_scores),
                                                                             np.std(auc_scores)))
