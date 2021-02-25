@@ -126,6 +126,30 @@ def read_frame_data(base_p, extra_t=0):
     return frame_data
 
 
+def get_clusters(nodec, srcn, dstn):
+    clusters = {}
+    cluster_idx = 0
+    for node in range(nodec):
+        if node not in clusters.keys():
+            clusters[node] = -1
+            if node in srcn:
+                clusters[node] = cluster_idx
+                cluster_idx += 1
+                for idx, u in enumerate(list(srcn)):
+                    if u == node:
+                        clusters[int(dstn[idx])] = clusters[node]
+    return clusters
+
+
+def swap_clusters(clusters):
+    swapped_clusters = {}
+    for key, val in clusters.items():
+        if val not in swapped_clusters.keys():
+            swapped_clusters[val] = []
+        swapped_clusters[val].append(key)
+    return swapped_clusters
+
+
 extra_time = 10000
 frame_data_cpp = read_frame_data(base_path_cpp, 0)
 frame_data_ps = read_frame_data(base_path_ps, extra_time)
@@ -268,7 +292,7 @@ test_bg = dgl.batch(test_graphs)
 # print(train_bg.batch_size)
 # print(test_bg.batch_size)
 
-param_opt = True
+param_opt = False
 
 h_feats_list = [2, 3, 4, 5, 6, 10, 15, 20]
 epochs_list = [10, 15, 20, 25, 30, 40, 50, 100, 150, 200, 250]
@@ -353,8 +377,8 @@ if param_opt:
             else:
                 model_output_tracker.to_csv('model_output_tracker.csv', mode='w', index=False, header=True)
 else:
-    h_feats = 5
-    epochs = 100
+    h_feats = 3
+    epochs = 20
     model = GraphSAGE(train_bg.ndata['feat'].shape[1], h_feats)
     # # You can replace DotPredictor with MLPPredictor.
     pred = MLPPredictor(h_feats)
@@ -401,7 +425,11 @@ else:
     #
     start_t = datetime.datetime.now()
     plot_tests = False
+    count = 0
     auc_scores = []
+    precision_scores = []
+    recall_scores = []
+    f1_scores = []
     for batched_graph in test_graphs:
         test_graph = copy.copy(batched_graph)
         # print('Test graph', test_graph.ndata['feat'])
@@ -448,13 +476,92 @@ else:
             # print('AUC', auc)
             auc_scores.append(auc)
 
+        to_remove = []
+        for i in range(len(test_labels)):
+            if test_labels[i] == 0:
+                to_remove.append(i)
         if plot_tests:
-            to_remove = []
-            for i in range(len(test_labels)):
-                if test_labels[i] == 0:
-                    to_remove.append(i)
             fig, (ax1, ax2) = plt.subplots(1, 2)
-            test_graph_out.remove_edges(to_remove)
+        test_graph_out.remove_edges(to_remove)
+
+        original_nodec = batched_graph.num_nodes()
+        original_u, original_v = batched_graph.edges()
+        pred_nodec = test_graph_out.num_nodes()
+        pred_u, pred_v = test_graph_out.edges()
+        original_clusters = get_clusters(original_nodec, original_u, original_v)
+        pred_clusters = get_clusters(pred_nodec, pred_u, pred_v)
+        # pprint(original_clusters)
+        # pprint(pred_clusters)
+
+        swap_original_clusters = swap_clusters(original_clusters)
+        swap_pred_clusters = swap_clusters(pred_clusters)
+        # pprint(swap_original_clusters)
+        # pprint(swap_pred_clusters)
+
+        tp = 0
+        fp = 0
+        fn = 0
+        t = 2/3
+        t_ = 1-t
+        used_pred_clusters = [-1]
+        for key, cluster in swap_original_clusters.items():
+            if key == -1:
+                continue
+            else:
+                matched_clusters = {}
+                fullsize = len(cluster)
+                for pred_key, pred_cluster in swap_pred_clusters.items():
+                    if pred_key == -1:
+                        continue
+                    match = 0
+                    miss = 0
+                    for node in cluster:
+                        if node in pred_cluster:
+                            match += 1
+                        else:
+                            miss += 1
+                    if match > 0:
+                        matched_clusters[pred_key] = [match, miss]
+                max_match = 0
+                best_match = {}
+                for match_key, match_val in matched_clusters.items():
+                    if match_val[0] > max_match:
+                        max_match = match_val[0]
+                        best_match = {match_key: match_val}
+                if len(list(best_match.keys())) == 0:
+                    continue
+                used_pred_clusters.append(list(best_match.keys())[0])
+                best_match_val = list(best_match.values())[0]
+                match = best_match_val[0]
+                miss = best_match_val[1]
+                if match / fullsize >= t and miss / fullsize <= t_:
+                    tp += 1
+                    verdict = 'tp'
+                else:
+                    fn += 1
+                    verdict = 'fn'
+                # print(key, match, miss, fullsize, verdict)
+        for key in swap_pred_clusters.keys():
+            if key not in used_pred_clusters:
+                fp += 1
+        # print('TP: %d, FN: %d, FP: %d' % (tp, fn, fp))
+        if tp + fp == 0:
+            precision = 0
+        else:
+            precision = tp / (tp + fp)
+        if tp + fn == 0:
+            recall = 0
+        else:
+            recall = tp / (tp + fn)
+        if precision + recall == 0:
+            continue
+        else:
+            f1 = 2 * (precision * recall) / (precision + recall)
+            precision_scores.append(precision)
+            recall_scores.append(recall)
+            f1_scores.append(f1)
+
+        if plot_tests:
             nx_g = test_graph_out.to_networkx().to_undirected()
             # pos = nx.kamada_kawai_layout(nx_g)
             ax1 = plt.subplot(1,2,1)
@@ -467,7 +574,11 @@ else:
             # ax2.margin(5)
             # plt.show()
             plt.close()
-    print('#%d of %d\t%d, %d\tTested on: %d, Avg AUC: %.4f, Stdev: %.4f' % (count, total, h_feats, epochs,
+            count += 1
+            # if count == 3:
+            #     break
+    print('%d, %d\tTested on: %d, Avg AUC: %.4f, Stdev: %.4f' % (h_feats, epochs,
                                                                             len(auc_scores), np.mean(auc_scores),
                                                                             np.std(auc_scores)))
     print('Testing took: ', datetime.datetime.now()-start_t)
+    print('Precision: %.4f, Recall: %.4f, F1: %.4f' % (np.mean(precision_scores), np.mean(recall_scores), np.mean(f1_scores)))
